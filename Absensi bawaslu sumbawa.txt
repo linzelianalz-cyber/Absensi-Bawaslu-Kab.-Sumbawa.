@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Presensi & Monitoring - Bawaslu Kabupaten Sumbawa</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS untuk Peta -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body class="bg-slate-50 font-sans">
+
+    <!-- Container Utama -->
+    <div class="max-w-5xl mx-auto p-4 md:p-6">
+        
+        <!-- Header Resmi -->
+        <header class="bg-red-700 text-white p-4 rounded-xl shadow-md mb-6 flex flex-col md:flex-row justify-between items-center gap-3">
+            <div>
+                <h1 class="text-lg md:text-xl font-bold">BAWASLU KABUPATEN SUMBAWA</h1>
+                <p class="text-xs text-red-100">Sistem Informasi Presensi Wajah & Geotagging Pengawasan</p>
+            </div>
+            <div id="clock" class="text-sm font-semibold bg-red-800 px-3 py-1.5 rounded-lg border border-red-600"></div>
+        </header>
+
+        <!-- Grid Menu: Absensi & Dashboard Monitoring -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            <!-- Panel Absensi Pegawai -->
+            <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200 flex flex-col">
+                <h2 class="text-base font-bold text-slate-800 mb-3">📸 Form Kehadiran (Open Cam)</h2>
+                
+                <!-- Input Nama / NIP -->
+                <div class="mb-3">
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">Nama / Jabatan:</label>
+                    <input type="text" id="nama-pegawai" placeholder="Contoh: Staf Sekretariat / Panwascam" class="w-full px-3 py-2 text-xs border rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500">
+                </div>
+
+                <!-- Kamera Preview -->
+                <div class="relative bg-slate-900 rounded-lg overflow-hidden aspect-video mb-3 flex items-center justify-center">
+                    <video id="video" autoplay playsinline class="w-full h-full object-cover"></video>
+                    <canvas id="canvas" class="hidden"></canvas>
+                </div>
+
+                <!-- Info GPS & Radius Kantor -->
+                <div class="bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs text-slate-600 mb-3 space-y-1">
+                    <p><strong>Status GPS:</strong> <span id="gps-status" class="text-amber-600 font-medium">Mencari lokasi...</span></p>
+                    <p><strong>Koordinat Anda:</strong> <span id="coords">-</span></p>
+                    <p><strong>Validasi Radius:</strong> <span id="radius-status" class="text-slate-500">-</span></p>
+                </div>
+
+                <!-- Tombol Kirim -->
+                <button onclick="takeAttendance()" class="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-2.5 rounded-lg transition shadow text-xs">
+                    Kirim Absensi Kehadiran
+                </button>
+            </div>
+
+            <!-- Panel Dashboard Pimpinan & Peta -->
+            <div class="bg-white p-5 rounded-xl shadow-sm border border-slate-200 flex flex-col">
+                <h2 class="text-base font-bold text-slate-800 mb-2">📊 Dashboard Monitoring Pimpinan</h2>
+                <p class="text-xs text-slate-500 mb-3">Pemantauan kehadiran pegawai secara *real-time*:</p>
+                
+                <!-- Peta Lokasi (Leaflet) -->
+                <div id="map" class="w-full h-40 rounded-lg mb-3 border border-slate-200 z-0"></div>
+
+                <!-- Daftar Riwayat Absen -->
+                <div id="attendance-list" class="space-y-2 overflow-y-auto max-h-[200px] pr-1">
+                    <p class="text-xs text-slate-400 text-center py-6">Belum ada data absensi masuk hari ini.</p>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Script Logika Aplikasi -->
+    <script>
+        // Titik Koordinat Kantor Bawaslu Kabupaten Sumbawa (Contoh titik estimasi di Sumbawa Besar)
+        const KANTOR_LAT = -8.5061; 
+        const KANTOR_LNG = 117.4265;
+        const MAKS_RADIUS_METER = 500; // Batas toleransi radius dalam meter
+
+        // Jam Real-time
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('clock').innerText = now.toLocaleTimeString('id-ID') + " WITA";
+        }, 1000);
+
+        // Inisialisasi Peta
+        const map = L.map('map').setView([KANTOR_LAT, KANTOR_LNG], 15);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+        
+        // Marker Kantor Bawaslu
+        L.marker([KANTOR_LAT, KANTOR_LNG]).addTo(map)
+          .bindPopup("<b>Kantor Bawaslu Kab. Sumbawa</b>").openPopup();
+
+        // Akses Kamera
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        let currentLatitude = null;
+        let currentLongitude = null;
+        let isInsideRadius = false;
+
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } })
+            .then(stream => { video.srcObject = stream; })
+            .catch(err => { alert("Gagal mengakses kamera perangkat: " + err); });
+
+        // Fungsi Hitung Jarak (Haversine Formula)
+        function hitungJarak(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; // Meter
+            const φ1 = lat1 * Math.PI/180;
+            const φ2 = lat2 * Math.PI/180;
+            const Δφ = (lat2-lat1) * Math.PI/180;
+            const Δλ = (lon2-lon1) * Math.PI/180;
+
+            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                      Math.cos(φ1) * Math.cos(φ2) *
+                      Math.sin(Δλ/2) * Math.sin(Δλ/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c; // Jarak dalam meter
+        }
+
+        // Ambil Lokasi GPS
+        if (navigator.geolocation) {
+            navigator.geolocation.watchPosition(position => {
+                currentLatitude = position.coords.latitude;
+                currentLongitude = position.coords.longitude;
+                document.getElementById('coords').innerText = `${currentLatitude.toFixed(4)}, ${currentLongitude.toFixed(4)}`;
+                
+                const jarak = hitungJarak(currentLatitude, currentLongitude, KANTOR_LAT, KANTOR_LNG);
+                const statusEl = document.getElementById('radius-status');
+                const gpsStatusEl = document.getElementById('gps-status');
+
+                gpsStatusEl.innerText = "GPS Terkunci";
+                gpsStatusEl.className = "text-emerald-600 font-semibold";
+
+                if (jarak <= MAKS_RADIUS_METER) {
+                    isInsideRadius = true;
+                    statusEl.innerHTML = `<span class="text-emerald-600 font-bold">Dalam area Kantor (±${Math.round(jarak)}m)</span>`;
+                } else {
+                    isInsideRadius = false;
+                    statusEl.innerHTML = `<span class="text-rose-600 font-bold">Diluar radius kantor (±${Math.round(jarak)}m)</span>`;
+                }
+            }, error => {
+                document.getElementById('gps-status').innerText = "Gagal mendeteksi GPS";
+                document.getElementById('gps-status').className = "text-rose-600 font-semibold";
+            }, { enableHighAccuracy: true });
+        } else {
+            alert("Browser tidak mendukung geolokasi.");
+        }
+
+        // Proses Kirim Absensi
+        let attendanceData = [];
+
+        function takeAttendance() {
+            const nama = document.getElementById('nama-pegawai').value.trim();
+            if (!nama) {
+                alert("Mohon masukkan Nama atau Jabatan Anda terlebih dahulu!");
+                return;
+            }
+            if (!currentLatitude || !currentLongitude) {
+                alert("Menunggu sinyal GPS terkunci...");
+                return;
+            }
+            
+            // Validasi opsional jika ingin wajib di dalam kantor:
+            // if (!isInsideRadius) { alert("Anda berada di luar radius kantor Bawaslu Sumbawa!"); return; }
+
+            // Tangkap foto dari video
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const photoUrl = canvas.toDataURL('image/png');
+
+            const record = {
+                nama: nama,
+                time: new Date().toLocaleTimeString('id-ID'),
+                lat: currentLatitude,
+                lng: currentLongitude,
+                photo: photoUrl
+            };
+
+            attendanceData.unshift(record);
+            renderDashboard();
+            alert("Absensi berhasil direkam!");
+        }
+
+        // Render Dashboard
+        function renderDashboard() {
+            const container = document.getElementById('attendance-list');
+            if (attendanceData.length === 0) return;
+
+            container.innerHTML = attendanceData.map(item => `
+                <div class="flex items-center gap-3 p-2 bg-slate-50 rounded-lg border border-slate-100 text-xs">
+                    <img src="${item.photo}" class="w-10 h-10 rounded-md object-cover border">
+                    <div class="flex-1">
+                        <p class="font-bold text-slate-700">${item.nama}</p>
+                        <p class="text-slate-500">Waktu: ${item.time}</p>
+                    </div>
+                    <span class="bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded text-[10px]">Hadir</span>
+                </div>
+            `).join('');
+        }
+    </script>
+</body>
+</html>
